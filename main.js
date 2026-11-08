@@ -1,5 +1,16 @@
-const { Plugin, ItemView, Menu, Notice, Keymap, Scope, setIcon, requestUrl, prepareFuzzySearch } = require('obsidian');
-const fs = require('fs');
+const {
+  Plugin,
+  ItemView,
+  Menu,
+  Notice,
+  Keymap,
+  Scope,
+  setIcon,
+  requestUrl,
+  prepareFuzzySearch,
+  TFolder,
+  normalizePath
+} = require('obsidian');
 const path = require('path');
 const crypto = require('crypto');
 
@@ -60,11 +71,15 @@ class VaultReactAppView extends ItemView {
     this.contentEl.empty();
     this.contentEl.addClass('vault-react-app-view-content');
 
-    this.contentEl.addEventListener('pointerdown', () => {
-      if (this.leaf && this.app.workspace && this.app.workspace.activeLeaf !== this.leaf) {
-        this.app.workspace.setActiveLeaf(this.leaf, { focus: false });
-      }
-    }, true);
+    this.contentEl.addEventListener(
+      'pointerdown',
+      () => {
+        if (this.leaf && this.app.workspace && this.app.workspace.activeLeaf !== this.leaf) {
+          this.app.workspace.setActiveLeaf(this.leaf, { focus: false });
+        }
+      },
+      true
+    );
 
     this.addAction('refresh-cw', 'Reload App', () => {
       this.loadApp();
@@ -97,41 +112,33 @@ class VaultReactAppView extends ItemView {
     this.contentEl.empty();
   }
 
-  collectMarkdownFiles() {
-    const basePath = this.app.vault.adapter.getBasePath();
-    const absAppDir = path.join(basePath, this.appPath);
-    const parentDir = path.dirname(absAppDir);
+  async collectMarkdownFiles() {
     const filesMap = {};
+    const normAppPath = normalizePath(this.appPath);
+    const slashIdx = normAppPath.lastIndexOf('/');
+    const parentDir = slashIdx > -1 ? normAppPath.substring(0, slashIdx) : '';
+    const parentPrefix = parentDir ? `${parentDir}/` : '';
+    const appPrefix = `${normAppPath}/`;
 
-    const walkMd = (dir, relPrefix) => {
-      let entries = [];
+    const mdFiles = this.app.vault.getMarkdownFiles();
+    for (const file of mdFiles) {
+      const p = file.path;
+      if (parentPrefix && !p.startsWith(parentPrefix)) continue;
+      if (p.startsWith(appPrefix)) continue;
+      const segments = p.split('/');
+      if (segments.some(s => IGNORED_DIRS.has(s) || s.startsWith('.'))) continue;
+
+      const rel = parentPrefix ? p.slice(parentPrefix.length) : p;
       try {
-        entries = fs.readdirSync(dir, { withFileTypes: true });
-      } catch {
-        return;
-      }
-      for (const entry of entries) {
-        if (IGNORED_DIRS.has(entry.name) || entry.name.startsWith('.')) continue;
-        const fullPath = path.join(dir, entry.name);
-        if (fullPath === absAppDir) continue;
-        const nextRel = relPrefix ? `${relPrefix}/${entry.name}` : entry.name;
-        if (entry.isDirectory()) {
-          walkMd(fullPath, nextRel);
-        } else if (entry.isFile() && entry.name.toLowerCase().endsWith('.md')) {
-          try {
-            filesMap[`../../${nextRel}`] = fs.readFileSync(fullPath, 'utf8');
-          } catch {}
-        }
-      }
-    };
-
-    walkMd(parentDir, '');
+        filesMap[`../../${rel}`] = await this.app.vault.read(file);
+      } catch {}
+    }
     return filesMap;
   }
 
-  pushLiveVaultFiles() {
+  async pushLiveVaultFiles() {
     if (!this.iframeEl || !this.iframeEl.contentWindow) return;
-    const files = this.collectMarkdownFiles();
+    const files = await this.collectMarkdownFiles();
     this.iframeEl.contentWindow.postMessage(
       {
         type: 'OBSIDIAN_JOURNAL_FILES',
@@ -143,31 +150,33 @@ class VaultReactAppView extends ItemView {
 
   async loadApp() {
     if (!this.appPath) return;
-    const basePath = this.app.vault.adapter.getBasePath();
-    const absAppDir = path.join(basePath, this.appPath);
+    const adapter = this.app.vault.adapter;
+    const appDir = normalizePath(this.appPath);
 
-    if (!fs.existsSync(absAppDir)) {
+    if (!(await adapter.exists(appDir))) {
       this.contentEl.empty();
       const errEl = this.contentEl.createDiv({ cls: 'vault-react-app-status' });
       errEl.createEl('div', { text: `App folder not found: ${this.appPath}` });
       return;
     }
 
-    const distDir = path.join(absAppDir, 'dist');
-    const distIndex = path.join(distDir, 'index.html');
-    if (!fs.existsSync(distIndex)) {
+    const distDir = normalizePath(`${appDir}/dist`);
+    const distIndex = normalizePath(`${distDir}/index.html`);
+    if (!(await adapter.exists(distIndex))) {
       this.contentEl.empty();
       const errEl = this.contentEl.createDiv({ cls: 'vault-react-app-status' });
       errEl.createEl('strong', { text: `No build found for ${this.getDisplayText()}` });
-      errEl.createEl('div', { text: `Please run 'npm run build' inside "${this.appPath}" in your terminal to build the app.` });
+      errEl.createEl('div', {
+        text: `Please run 'npm run build' inside "${this.appPath}" in your terminal to build the app.`
+      });
       return;
     }
 
     this.revokeBlobs();
 
-    let html = fs.readFileSync(distIndex, 'utf8');
+    let html = await adapter.read(distIndex);
 
-    // Extract live Obsidian CSS theme variables from document.body so the app matches Obsidian's exact theme
+    // Extract live CSS theme variables from document.body so the app matches the exact theme
     const computed = getComputedStyle(document.body);
     const themeVars = [
       '--background-primary',
@@ -201,48 +210,58 @@ class VaultReactAppView extends ItemView {
     const themeStyleBlock = `<style id="obsidian-theme-vars">\n:root {\n${themeVars}\n}\n</style>`;
 
     // Inline CSS <link> tags directly as <style> blocks so styles always apply inside srcdoc
-    html = html.replace(/<link\b[^>]*href=["']([^"']+\.css)["'][^>]*>/gi, (fullMatch, href) => {
+    const linkRegex = /<link\b[^>]*href=["']([^"']+\.css)["'][^>]*>/gi;
+    const linkMatches = [...html.matchAll(linkRegex)];
+    for (const match of linkMatches) {
+      const fullMatch = match[0];
+      const href = match[1];
       const cleanRel = href.replace(/^\.?\//, '');
-      const cssFile = path.join(distDir, cleanRel);
-      if (!fs.existsSync(cssFile)) return fullMatch;
-      const cssContent = fs.readFileSync(cssFile, 'utf8');
-      return `${themeStyleBlock}\n<style>\n${cssContent}\n</style>`;
-    });
+      const cssFile = normalizePath(`${distDir}/${cleanRel}`);
+      if (await adapter.exists(cssFile)) {
+        const cssContent = await adapter.read(cssFile);
+        html = html.replace(fullMatch, `${themeStyleBlock}\n<style>\n${cssContent}\n</style>`);
+      }
+    }
 
     // Replace JS <script> tags with Blob URLs
-    html = html.replace(/<script\b[^>]*src=["']([^"']+\.js)["'][^>]*><\/script>/gi, (fullMatch, src) => {
+    const scriptRegex = /<script\b[^>]*src=["']([^"']+\.js)["'][^>]*><\/script>/gi;
+    const scriptMatches = [...html.matchAll(scriptRegex)];
+    for (const match of scriptMatches) {
+      const fullMatch = match[0];
+      const src = match[1];
       const cleanRel = src.replace(/^\.?\//, '');
-      const jsFile = path.join(distDir, cleanRel);
-      if (!fs.existsSync(jsFile)) return fullMatch;
-      const jsContent = fs.readFileSync(jsFile, 'utf8');
-      const blobUrl = URL.createObjectURL(new Blob([jsContent], { type: 'text/javascript' }));
-      this.blobUrls.push(blobUrl);
-      return `<script type="module" src="${blobUrl}"></script>`;
-    });
+      const jsFile = normalizePath(`${distDir}/${cleanRel}`);
+      if (await adapter.exists(jsFile)) {
+        const jsContent = await adapter.read(jsFile);
+        const blobUrl = URL.createObjectURL(new Blob([jsContent], { type: 'text/javascript' }));
+        this.blobUrls.push(blobUrl);
+        html = html.replace(fullMatch, `<script type="module" src="${blobUrl}"></script>`);
+      }
+    }
 
     // Inject live vault markdown files + app-local data.json + transactions-cache.json before the app script executes
-    const rawFilesMap = this.collectMarkdownFiles();
+    const rawFilesMap = await this.collectMarkdownFiles();
     let appLocalData = null;
-    const appDataFile = path.join(absAppDir, 'data.json');
-    if (fs.existsSync(appDataFile)) {
+    const appDataFile = normalizePath(`${appDir}/data.json`);
+    if (await adapter.exists(appDataFile)) {
       try {
-        appLocalData = JSON.parse(fs.readFileSync(appDataFile, 'utf8'));
+        appLocalData = JSON.parse(await adapter.read(appDataFile));
       } catch {}
     }
     let appTransactionsCache = null;
-    const txCacheFile = path.join(absAppDir, 'transactions-cache.json');
-    if (fs.existsSync(txCacheFile)) {
+    const txCacheFile = normalizePath(`${appDir}/transactions-cache.json`);
+    if (await adapter.exists(txCacheFile)) {
       try {
-        appTransactionsCache = JSON.parse(fs.readFileSync(txCacheFile, 'utf8'));
+        appTransactionsCache = JSON.parse(await adapter.read(txCacheFile));
       } catch {}
     }
     const dataBlobUrl = URL.createObjectURL(
       new Blob(
         [
           `window.__OBSIDIAN_RAW_FILES__ = ${JSON.stringify(rawFilesMap)};\n` +
-          `window.__OBSIDIAN_APP_PATH__ = ${JSON.stringify(this.appPath)};\n` +
-          `window.__OBSIDIAN_APP_DATA__ = ${JSON.stringify(appLocalData)};\n` +
-          `window.__OBSIDIAN_TRANSACTIONS_CACHE__ = ${JSON.stringify(appTransactionsCache)};`
+            `window.__OBSIDIAN_APP_PATH__ = ${JSON.stringify(this.appPath)};\n` +
+            `window.__OBSIDIAN_APP_DATA__ = ${JSON.stringify(appLocalData)};\n` +
+            `window.__OBSIDIAN_TRANSACTIONS_CACHE__ = ${JSON.stringify(appTransactionsCache)};`
         ],
         {
           type: 'text/javascript'
@@ -331,7 +350,10 @@ class VaultReactAppView extends ItemView {
     const bridgeBlobUrl = URL.createObjectURL(new Blob([bridgeScript], { type: 'text/javascript' }));
     this.blobUrls.push(bridgeBlobUrl);
 
-    html = html.replace('<head>', `<head>\n    <script src="${dataBlobUrl}"></script>\n    <script src="${bridgeBlobUrl}"></script>`);
+    html = html.replace(
+      '<head>',
+      `<head>\n    <script src="${dataBlobUrl}"></script>\n    <script src="${bridgeBlobUrl}"></script>`
+    );
 
     this.contentEl.empty();
     const iframe = document.createElement('iframe');
@@ -439,14 +461,24 @@ module.exports = class VaultReactAppsPlugin extends Plugin {
 
     proto.getSuggestions = function (query) {
       const res = origGet.call(this, query) || [];
-      const out = res.filter(it => !(it && it.file && (plugin.isInsideApp(it.file.path) || it.file.path === '_fit' || it.file.path.startsWith('_fit/'))));
+      const out = res.filter(
+        it =>
+          !(
+            it &&
+            it.file &&
+            (plugin.isInsideApp(it.file.path) || it.file.path === '_fit' || it.file.path.startsWith('_fit/'))
+          )
+      );
       const q = (query || '').trim();
       const fuzzy = q ? prepareFuzzySearch(q) : null;
       const apps = [];
       for (const appPath of plugin.appFolders) {
         if (appPath === '_fit' || appPath.startsWith('_fit/')) continue;
         const name = path.posix.basename(appPath);
-        if (!fuzzy) { apps.push({ type: 'vault-react-app', appPath, match: { score: -100, matches: [] } }); continue; }
+        if (!fuzzy) {
+          apps.push({ type: 'vault-react-app', appPath, match: { score: -100, matches: [] } });
+          continue;
+        }
         const m = fuzzy(name) || fuzzy(appPath);
         if (m) apps.push({ type: 'vault-react-app', appPath, match: m });
       }
@@ -480,7 +512,10 @@ module.exports = class VaultReactAppsPlugin extends Plugin {
   }
 
   onunload() {
-    if (this._restoreSwitcher) { this._restoreSwitcher(); this._switcherPatched = false; }
+    if (this._restoreSwitcher) {
+      this._restoreSwitcher();
+      this._switcherPatched = false;
+    }
     if (this.observer) {
       this.observer.disconnect();
       this.observer = null;
@@ -496,31 +531,19 @@ module.exports = class VaultReactAppsPlugin extends Plugin {
   }
 
   scanVaultApps() {
-    const basePath = this.app.vault.adapter.getBasePath();
     const detected = new Set();
-
-    const walk = (absDir, relDir) => {
-      let entries = [];
-      try {
-        entries = fs.readdirSync(absDir, { withFileTypes: true });
-      } catch {
-        return;
+    const allFiles = this.app.vault.getAllLoadedFiles();
+    for (const item of allFiles) {
+      if (item instanceof TFolder) {
+        if (!item.path || (typeof item.isRoot === 'function' && item.isRoot())) continue;
+        const segments = item.path.split('/');
+        if (segments.some(s => IGNORED_DIRS.has(s) || s.startsWith('.'))) continue;
+        const childNames = new Set((item.children || []).map(c => c.name));
+        if (childNames.has('package.json') && childNames.has('index.html')) {
+          detected.add(item.path);
+        }
       }
-      const names = new Set(entries.map(e => e.name));
-      if (relDir && names.has('package.json') && names.has('index.html')) {
-        detected.add(relDir);
-        return;
-      }
-      for (const entry of entries) {
-        if (!entry.isDirectory()) continue;
-        if (IGNORED_DIRS.has(entry.name) || entry.name.startsWith('.')) continue;
-        const nextAbs = path.join(absDir, entry.name);
-        const nextRel = relDir ? `${relDir}/${entry.name}` : entry.name;
-        walk(nextAbs, nextRel);
-      }
-    };
-
-    walk(basePath, '');
+    }
     this.appFolders = detected;
   }
 
@@ -649,7 +672,11 @@ module.exports = class VaultReactAppsPlugin extends Plugin {
       const isExpanded = this.expandedFolders.has(appPath);
       menu.addItem(item =>
         item
-          .setTitle(isExpanded ? 'Collapse to App Item (Hide Source Files)' : 'Toggle Folder Expand (Inspect Source Files)')
+          .setTitle(
+            isExpanded
+              ? 'Collapse to App Item (Hide Source Files)'
+              : 'Toggle Folder Expand (Inspect Source Files)'
+          )
           .setIcon(isExpanded ? 'app-window' : 'folder-open')
           .onClick(() => {
             if (isExpanded) {
@@ -692,28 +719,35 @@ module.exports = class VaultReactAppsPlugin extends Plugin {
         const newLeaf = data.newLeaf ? 'tab' : false;
         await this.app.workspace.openLinkText(linktext, '', newLeaf);
       } else if (data.type === 'OBSIDIAN_SAVE_APP_DATA' && data.appPath && data.payload !== undefined) {
-        const basePath = this.app.vault.adapter.getBasePath();
-        const absAppDir = path.join(basePath, data.appPath);
-        if (fs.existsSync(absAppDir)) {
-          const appDataFile = path.join(absAppDir, 'data.json');
+        const adapter = this.app.vault.adapter;
+        const appDir = normalizePath(data.appPath);
+        if (await adapter.exists(appDir)) {
+          const appDataFile = normalizePath(`${appDir}/data.json`);
           try {
-            fs.writeFileSync(appDataFile, JSON.stringify(data.payload, null, 2), 'utf8');
-          } catch {}
+            await adapter.write(appDataFile, JSON.stringify(data.payload, null, 2));
+          } catch (err) {
+            console.error('Failed to save app data:', err);
+          }
         }
       } else if (data.type === 'OBSIDIAN_SAVE_TRANSACTIONS_CACHE' && data.appPath && data.payload !== undefined) {
-        const basePath = this.app.vault.adapter.getBasePath();
-        const absAppDir = path.join(basePath, data.appPath);
-        if (fs.existsSync(absAppDir)) {
-          const txCacheFile = path.join(absAppDir, 'transactions-cache.json');
+        const adapter = this.app.vault.adapter;
+        const appDir = normalizePath(data.appPath);
+        if (await adapter.exists(appDir)) {
+          const txCacheFile = normalizePath(`${appDir}/transactions-cache.json`);
           try {
-            fs.writeFileSync(txCacheFile, JSON.stringify(data.payload), 'utf8');
-          } catch {}
+            await adapter.write(txCacheFile, JSON.stringify(data.payload));
+          } catch (err) {
+            console.error('Failed to save transactions cache:', err);
+          }
         }
       } else if (data.type === 'OBSIDIAN_FETCH_URL' && data.requestId && data.url) {
         const reply = payload => {
           try {
             if (e.source && typeof e.source.postMessage === 'function') {
-              e.source.postMessage({ type: 'OBSIDIAN_FETCH_URL_RESULT', requestId: data.requestId, ...payload }, '*');
+              e.source.postMessage(
+                { type: 'OBSIDIAN_FETCH_URL_RESULT', requestId: data.requestId, ...payload },
+                '*'
+              );
             }
           } catch {}
         };
@@ -737,7 +771,10 @@ module.exports = class VaultReactAppsPlugin extends Plugin {
         const reply = payload => {
           try {
             if (e.source && typeof e.source.postMessage === 'function') {
-              e.source.postMessage({ type: 'OBSIDIAN_FETCH_URL_RESULT', requestId: data.requestId, ...payload }, '*');
+              e.source.postMessage(
+                { type: 'OBSIDIAN_FETCH_URL_RESULT', requestId: data.requestId, ...payload },
+                '*'
+              );
             }
           } catch {}
         };
@@ -753,7 +790,8 @@ module.exports = class VaultReactAppsPlugin extends Plugin {
           const claim = b64url(
             JSON.stringify({
               iss: data.clientEmail.trim(),
-              scope: 'https://www.googleapis.com/auth/spreadsheets.readonly https://www.googleapis.com/auth/drive.readonly',
+              scope:
+                'https://www.googleapis.com/auth/spreadsheets.readonly https://www.googleapis.com/auth/drive.readonly',
               aud: 'https://oauth2.googleapis.com/token',
               exp: now + 3600,
               iat: now
@@ -780,7 +818,9 @@ module.exports = class VaultReactAppsPlugin extends Plugin {
           });
           const tokenJson = JSON.parse(tokenRes.text || '{}');
           if (!tokenJson.access_token) {
-            throw new Error(tokenJson.error_description || tokenJson.error || 'Failed to obtain Service Account access token');
+            throw new Error(
+              tokenJson.error_description || tokenJson.error || 'Failed to obtain Service Account access token'
+            );
           }
 
           const csvRes = await requestUrl({
@@ -797,9 +837,6 @@ module.exports = class VaultReactAppsPlugin extends Plugin {
   }
 
   async openApp(appPath, paneType = false) {
-    // Behave like standard Obsidian file clicks:
-    // - If paneType is false (regular left-click), use the active unpinned leaf (or create one if pinned)
-    // - If paneType is 'tab' / 'split' / 'window' (Ctrl/Cmd/Middle-click), open in a new leaf
     const leaf = this.app.workspace.getLeaf(paneType);
     await leaf.setViewState({
       type: VIEW_TYPE_VAULT_REACT_APP,
