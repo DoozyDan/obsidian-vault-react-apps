@@ -1,0 +1,62 @@
+/* Hide internal files of Vault Apps in the File Explorer unless "Inspect Source Files" is toggled */
+.nav-folder.is-vault-app:not(.is-vault-app-expanded) > .nav-folder-children {
+  display: none !important;
+}
+
+/* Keep the App icon upright (do not rotate -90deg like a collapsed folder chevron) */
+.nav-folder.is-vault-app:not(.is-vault-app-expanded) > .nav-folder-title .collapse-icon,
+.nav-folder.is-vault-app:not(.is-vault-app-expanded) > .nav-folder-title.is-collapsed .collapse-icon {
+  transform: none !important;
+  color: var(--interactive-accent, #a78bfa);
+  opacity: 0.95;
+}
+
+.nav-folder.is-vault-app:not(.is-vault-app-expanded) > .nav-folder-title .collapse-icon svg.svg-icon {
+  width: 15px;
+  height: 15px;
+  stroke-width: 2px;
+}
+
+/* Active state when the Vault App is the currently focused tab */
+.nav-folder.is-vault-app:not(.is-vault-app-expanded) > .nav-folder-title.is-active {
+  background-color: var(--nav-item-background-active);
+  color: var(--nav-item-color-active);
+  font-weight: var(--nav-item-weight-active);
+}
+
+/* Seamless full-bleed browser frame inside the Obsidian tab */
+.workspace-leaf-content[data-type="vault-react-app-view"] > .view-content,
+.vault-react-app-view-content {
+  padding: 0 !important;
+  margin: 0 !important;
+  overflow: hidden !important;
+  display: flex !important;
+  flex-direction: column !important;
+  width: 100% !important;
+  height: 100% !important;
+  background-color: var(--background-primary);
+}
+
+.vault-react-app-iframe {
+  width: 100%;
+  height: 100%;
+  border: 0 !important;
+  margin: 0;
+  padding: 0;
+  flex: 1 1 auto;
+  display: block;
+  background-color: var(--background-primary);
+}
+
+.vault-react-app-status {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  width: 100%;
+  color: var(--text-muted);
+  font-size: 0.95rem;
+  gap: 10px;
+  background-color: var(--background-primary);
+}

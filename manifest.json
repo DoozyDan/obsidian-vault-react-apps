@@ -1,0 +1,10 @@
+{
+  "id": "vault-react-apps",
+  "name": "Vault React Apps",
+  "version": "1.0.0",
+  "minAppVersion": "1.5.0",
+  "description": "Displays React app folders in the vault as single app items in the file tree and opens them in a seamless Obsidian tab.",
+  "author": "Dan",
+  "authorUrl": "https://github.com/DoozyDan",
+  "isDesktopOnly": true
+}
