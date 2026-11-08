@@ -1,6 +1,6 @@
 {
   "name": "obsidian-vault-react-apps",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Displays React app folders in the vault as single app items in the file tree and opens them in seamless native tabs.",
   "main": "main.js",
   "keywords": [
